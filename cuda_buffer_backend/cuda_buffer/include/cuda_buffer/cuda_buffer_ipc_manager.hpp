@@ -1,0 +1,81 @@
+// Copyright 2026 Open Source Robotics Foundation, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef CUDA_BUFFER__CUDA_BUFFER_IPC_MANAGER_HPP_
+#define CUDA_BUFFER__CUDA_BUFFER_IPC_MANAGER_HPP_
+
+#include <cuda.h>
+
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
+namespace cuda_buffer_backend
+{
+
+struct VmmBlock;
+struct IPCMetadata;
+
+/// \brief Manages VMM IPC: exports FDs on publish, imports/maps/caches on subscribe.
+class CudaVmmIPCManager
+{
+public:
+  CudaVmmIPCManager();
+  ~CudaVmmIPCManager();
+
+  CudaVmmIPCManager(const CudaVmmIPCManager &) = delete;
+  CudaVmmIPCManager & operator=(const CudaVmmIPCManager &) = delete;
+  CudaVmmIPCManager(CudaVmmIPCManager &&) = delete;
+  CudaVmmIPCManager & operator=(CudaVmmIPCManager &&) = delete;
+
+  std::string register_block(VmmBlock * block);
+
+  struct ImportResult
+  {
+    CUdeviceptr va;
+    IPCMetadata * ipc_meta;
+  };
+
+  static ImportResult import_block(
+    const std::string & socket_path,
+    int32_t pid,
+    uint32_t block_id,
+    uint64_t size,
+    uint64_t expected_uid);
+
+  static void release_import(int32_t pid, uint32_t block_id);
+
+private:
+  static int create_fd_server_socket(const std::string & socket_path);
+  static int receive_fd_from_socket(const std::string & socket_path);
+
+  struct FDDispatcher;
+  static std::shared_ptr<FDDispatcher> get_dispatcher();
+
+  std::shared_ptr<FDDispatcher> dispatcher_;
+
+  struct RegisteredBlockInfo
+  {
+    int server_socket;
+    std::string socket_path;
+  };
+  std::unordered_map<uint32_t, RegisteredBlockInfo> registered_blocks_;
+  std::mutex blocks_mutex_;
+};
+
+}  // namespace cuda_buffer_backend
+
+#endif  // CUDA_BUFFER__CUDA_BUFFER_IPC_MANAGER_HPP_
