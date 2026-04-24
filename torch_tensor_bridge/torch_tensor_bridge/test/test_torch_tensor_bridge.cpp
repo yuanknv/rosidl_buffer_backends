@@ -23,10 +23,10 @@ using torch_tensor_bridge::TensorMsg;
 using torch_tensor_bridge::allocate_tensor;
 using torch_tensor_bridge::from_tensor_msg;
 using torch_tensor_bridge::to_tensor_msg;
-using torch_tensor_bridge::dlpack::kDLCPU;
-using torch_tensor_bridge::dlpack::kDLUInt;
-using torch_tensor_bridge::dlpack::kDLInt;
-using torch_tensor_bridge::dlpack::kDLFloat;
+
+// Note: kDLCPU, kDLUInt, kDLInt, kDLFloat are enumerators of DLDataTypeCode /
+// DLDeviceType declared at global scope by <ATen/dlpack.h> (transitively
+// included by torch_tensor_bridge.hpp), so they are already visible here.
 
 TEST(TorchTensorBridge, AllocateCpuTensorPopulatesDlpackMetadata)
 {
@@ -157,6 +157,109 @@ TEST(TorchTensorBridge, DtypeConversionRejectsUnsupportedTriple)
   using torch_tensor_bridge::scalar_from_dl_dtype;
   EXPECT_THROW(scalar_from_dl_dtype(DLDataType{kDLFloat, 128, 1}), std::runtime_error);
   EXPECT_THROW(scalar_from_dl_dtype(DLDataType{kDLFloat, 32, 4}), std::runtime_error);
+}
+
+TEST(TorchTensorBridge, MakeDlpackReadPopulatesDlTensorFields)
+{
+  TensorMsg msg = allocate_tensor({2, 3}, at::kFloat, c10::kCPU);
+  {
+    at::Tensor t = torch_tensor_bridge::from_tensor_msg(msg);
+    t.copy_(torch::arange(0, 6, at::kFloat).reshape({2, 3}));
+  }
+
+  auto * dlm = torch_tensor_bridge::make_dlpack_read(msg);
+  ASSERT_NE(dlm, nullptr);
+  ASSERT_NE(dlm->deleter, nullptr);
+
+  EXPECT_EQ(dlm->dl_tensor.ndim, 2);
+  ASSERT_NE(dlm->dl_tensor.shape, nullptr);
+  EXPECT_EQ(dlm->dl_tensor.shape[0], 2);
+  EXPECT_EQ(dlm->dl_tensor.shape[1], 3);
+  ASSERT_NE(dlm->dl_tensor.strides, nullptr);
+  EXPECT_EQ(dlm->dl_tensor.strides[0], 3);
+  EXPECT_EQ(dlm->dl_tensor.strides[1], 1);
+
+  EXPECT_EQ(dlm->dl_tensor.dtype.code, static_cast<uint8_t>(kDLFloat));
+  EXPECT_EQ(dlm->dl_tensor.dtype.bits, 32u);
+  EXPECT_EQ(dlm->dl_tensor.dtype.lanes, 1u);
+
+  EXPECT_EQ(static_cast<int32_t>(dlm->dl_tensor.device.device_type),
+    static_cast<int32_t>(kDLCPU));
+  EXPECT_EQ(dlm->dl_tensor.device.device_id, 0);
+  EXPECT_EQ(dlm->dl_tensor.byte_offset, 0u);
+  EXPECT_NE(dlm->dl_tensor.data, nullptr);
+
+  dlm->deleter(dlm);
+}
+
+TEST(TorchTensorBridge, MakeDlpackReadWithByteOffset)
+{
+  TensorMsg msg = allocate_tensor({16}, at::kInt, c10::kCPU);
+  {
+    at::Tensor full = torch_tensor_bridge::from_tensor_msg(msg);
+    for (int i = 0; i < 16; ++i) {
+      full.index_put_({i}, i * 100);
+    }
+  }
+
+  // Capture the base pointer of the allocation, then publish a 4-element
+  // view starting at index 4 (16 bytes in).
+  auto * base = static_cast<const uint8_t *>(msg.data.data());
+  msg.shape = {4};
+  msg.strides = {1};
+  msg.byte_offset = 4 * sizeof(int32_t);
+
+  auto * dlm = torch_tensor_bridge::make_dlpack_read(msg);
+  ASSERT_NE(dlm, nullptr);
+  EXPECT_EQ(dlm->dl_tensor.ndim, 1);
+  EXPECT_EQ(dlm->dl_tensor.shape[0], 4);
+
+  // The bridge bakes msg.byte_offset into DLTensor::data and sets
+  // DLTensor::byte_offset to 0 (portable across DLPack importers that
+  // ignore the byte_offset field).
+  EXPECT_EQ(dlm->dl_tensor.byte_offset, 0u);
+  EXPECT_EQ(static_cast<const uint8_t *>(dlm->dl_tensor.data),
+    base + 4 * sizeof(int32_t));
+
+  dlm->deleter(dlm);
+}
+
+TEST(TorchTensorBridge, ToDlpackDispatchesOnConstness)
+{
+  TensorMsg msg = allocate_tensor({4}, at::kFloat, c10::kCPU);
+
+  auto * writable = torch_tensor_bridge::to_dlpack(msg);
+  ASSERT_NE(writable, nullptr);
+  EXPECT_EQ(writable->dl_tensor.ndim, 1);
+  EXPECT_EQ(writable->dl_tensor.shape[0], 4);
+  writable->deleter(writable);
+
+  auto * readable = torch_tensor_bridge::to_dlpack(
+    const_cast<const TensorMsg &>(msg));
+  ASSERT_NE(readable, nullptr);
+  EXPECT_EQ(readable->dl_tensor.shape[0], 4);
+  readable->deleter(readable);
+}
+
+TEST(TorchTensorBridge, ToDlpackOwnedFreesOnScopeExit)
+{
+  TensorMsg msg = allocate_tensor({3}, at::kInt, c10::kCPU);
+
+  {
+    auto holder = torch_tensor_bridge::to_dlpack_owned(
+      const_cast<const TensorMsg &>(msg));
+    ASSERT_TRUE(holder);
+    EXPECT_EQ(holder->dl_tensor.ndim, 1);
+    EXPECT_EQ(holder->dl_tensor.shape[0], 3);
+  }  // holder destructor invokes deleter; no leak.
+
+  // A second one, this time handed off via release() (simulating a
+  // framework's from_dlpack taking ownership).
+  auto holder2 = torch_tensor_bridge::to_dlpack_owned(
+    const_cast<const TensorMsg &>(msg));
+  DLManagedTensor * raw = holder2.release();
+  ASSERT_NE(raw, nullptr);
+  raw->deleter(raw);  // caller takes over ownership
 }
 
 int main(int argc, char ** argv)

@@ -15,6 +15,8 @@
 #ifndef TORCH_TENSOR_BRIDGE__TORCH_TENSOR_BRIDGE_HPP_
 #define TORCH_TENSOR_BRIDGE__TORCH_TENSOR_BRIDGE_HPP_
 
+#include <ATen/DLConvertor.h>
+#include <ATen/dlpack.h>
 #include <c10/core/StreamGuard.h>
 #include <rcutils/logging_macros.h>
 #include <torch/torch.h>
@@ -43,57 +45,15 @@ namespace torch_tensor_bridge
 
 using TensorMsg = torch_tensor_msgs::msg::Tensor;
 
-// DLPack constants replicated locally so the wire-format meaning is explicit
-// and doesn't depend on <ATen/dlpack.h> or a DLPack C header being in scope.
-// Values match https://dmlc.github.io/dlpack/latest/ exactly.
-namespace dlpack
-{
-
-enum DLDataTypeCode : uint8_t
-{
-  kDLInt = 0,
-  kDLUInt = 1,
-  kDLFloat = 2,
-  kDLOpaqueHandle = 3,
-  kDLBfloat = 4,
-  kDLComplex = 5,
-  kDLBool = 6,
-};
-
-enum DLDeviceType : int32_t
-{
-  kDLCPU = 1,
-  kDLCUDA = 2,
-  kDLCUDAHost = 3,
-  kDLOpenCL = 4,
-  kDLVulkan = 7,
-  kDLMetal = 8,
-  kDLVPI = 9,
-  kDLROCM = 10,
-  kDLROCMHost = 11,
-  kDLExtDev = 12,
-  kDLCUDAManaged = 13,
-  kDLOneAPI = 14,
-  kDLWebGPU = 15,
-  kDLHexagon = 16,
-};
-
-}  // namespace dlpack
-
-/// DLPack-equivalent scalar dtype triple.
-struct DLDataType
-{
-  uint8_t code;
-  uint8_t bits;
-  uint16_t lanes;
-};
-
-/// DLPack-equivalent device tuple.
-struct DLDevice
-{
-  int32_t type;
-  int32_t id;
-};
+// Re-export the canonical DLPack types from <dlpack.h> under our namespace
+// so user code can write `torch_tensor_bridge::DLDataType` without needing
+// to know about the global dlpack header. The DLDataTypeCode / DLDeviceType
+// enumerators (kDLInt, kDLUInt, kDLCPU, kDLCUDA, ...) are already in the
+// global namespace courtesy of <dlpack.h>, so users can just write
+// `kDLCUDA` or fully qualify as `::kDLCUDA`.
+using DLDataType = ::DLDataType;
+using DLDevice = ::DLDevice;
+using DLManagedTensor = ::DLManagedTensor;
 
 // ---------------------------------------------------------------------------
 // dtype conversions (at::ScalarType <-> DLDataType)
@@ -102,16 +62,16 @@ struct DLDevice
 inline DLDataType dl_dtype_from_scalar(at::ScalarType t)
 {
   switch (t) {
-    case at::kByte:     return {dlpack::kDLUInt, 8, 1};
-    case at::kChar:     return {dlpack::kDLInt, 8, 1};
-    case at::kShort:    return {dlpack::kDLInt, 16, 1};
-    case at::kInt:      return {dlpack::kDLInt, 32, 1};
-    case at::kLong:     return {dlpack::kDLInt, 64, 1};
-    case at::kHalf:     return {dlpack::kDLFloat, 16, 1};
-    case at::kBFloat16: return {dlpack::kDLBfloat, 16, 1};
-    case at::kFloat:    return {dlpack::kDLFloat, 32, 1};
-    case at::kDouble:   return {dlpack::kDLFloat, 64, 1};
-    case at::kBool:     return {dlpack::kDLBool, 8, 1};
+    case at::kByte:     return DLDataType{kDLUInt, 8, 1};
+    case at::kChar:     return DLDataType{kDLInt, 8, 1};
+    case at::kShort:    return DLDataType{kDLInt, 16, 1};
+    case at::kInt:      return DLDataType{kDLInt, 32, 1};
+    case at::kLong:     return DLDataType{kDLInt, 64, 1};
+    case at::kHalf:     return DLDataType{kDLFloat, 16, 1};
+    case at::kBFloat16: return DLDataType{kDLBfloat, 16, 1};
+    case at::kFloat:    return DLDataType{kDLFloat, 32, 1};
+    case at::kDouble:   return DLDataType{kDLFloat, 64, 1};
+    case at::kBool:     return DLDataType{kDLBool, 8, 1};
     default:
       throw std::runtime_error(
               "torch_tensor_bridge: unsupported at::ScalarType for DLPack encoding");
@@ -125,10 +85,10 @@ inline at::ScalarType scalar_from_dl_dtype(DLDataType d)
             "torch_tensor_bridge: dtype_lanes != 1 not representable as at::ScalarType");
   }
   switch (d.code) {
-    case dlpack::kDLUInt:
+    case kDLUInt:
       if (d.bits == 8) {return at::kByte;}
       break;
-    case dlpack::kDLInt:
+    case kDLInt:
       switch (d.bits) {
         case 8: return at::kChar;
         case 16: return at::kShort;
@@ -136,17 +96,17 @@ inline at::ScalarType scalar_from_dl_dtype(DLDataType d)
         case 64: return at::kLong;
       }
       break;
-    case dlpack::kDLFloat:
+    case kDLFloat:
       switch (d.bits) {
         case 16: return at::kHalf;
         case 32: return at::kFloat;
         case 64: return at::kDouble;
       }
       break;
-    case dlpack::kDLBfloat:
+    case kDLBfloat:
       if (d.bits == 16) {return at::kBFloat16;}
       break;
-    case dlpack::kDLBool:
+    case kDLBool:
       if (d.bits == 8) {return at::kBool;}
       break;
   }
@@ -157,37 +117,21 @@ inline at::ScalarType scalar_from_dl_dtype(DLDataType d)
           ", lanes=" + std::to_string(d.lanes) + ")");
 }
 
-/// Size, in bytes, of a single DLPack element (scalar * lanes).
 inline size_t dl_dtype_bytesize(DLDataType d)
 {
   return (static_cast<size_t>(d.bits) * d.lanes + 7) / 8;
 }
 
 // ---------------------------------------------------------------------------
-// Message field accessors (optional convenience)
+// Message field accessors
 // ---------------------------------------------------------------------------
 
-inline DLDataType get_dtype(const TensorMsg & m)
-{
-  return {m.dtype_code, m.dtype_bits, m.dtype_lanes};
-}
-
+/// Pack the three dtype fields of `m` back into a DLDataType struct.
 inline void set_dtype(TensorMsg & m, DLDataType d)
 {
   m.dtype_code = d.code;
   m.dtype_bits = d.bits;
   m.dtype_lanes = d.lanes;
-}
-
-inline DLDevice get_device(const TensorMsg & m)
-{
-  return {m.device_type, m.device_id};
-}
-
-inline void set_device(TensorMsg & m, DLDevice d)
-{
-  m.device_type = d.type;
-  m.device_id = d.id;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +184,22 @@ inline int64_t numel_of(const std::vector<int64_t> & shape)
   return n;
 }
 
+#ifdef TORCH_TENSOR_BRIDGE_HAS_CUDA
+inline cudaStream_t current_cuda_stream(const char * ctx)
+{
+  cudaStream_t s = at::cuda::getCurrentCUDAStream().stream();
+  if (s == nullptr) {
+    RCUTILS_LOG_WARN_NAMED(
+      "torch_tensor_bridge",
+      "%s: current CUDA stream is the default stream. "
+      "Set a non-default stream (e.g. via torch_tensor_bridge::set_stream()) "
+      "for event-based synchronization.",
+      ctx);
+  }
+  return s;
+}
+#endif
+
 }  // namespace detail
 
 /// RAII guard that sets a non-default CUDA stream for the current scope.
@@ -285,14 +245,16 @@ inline TensorMsg allocate_tensor(
   if (dev == c10::kCUDA) {
     int cur = 0;
     cudaGetDevice(&cur);
-    set_device(msg, {dlpack::kDLCUDA, cur});
+    msg.device_type = static_cast<int32_t>(kDLCUDA);
+    msg.device_id = cur;
     auto cuda_impl = std::make_unique<cuda_buffer_backend::CudaBufferImpl<uint8_t>>(byte_count);
     msg.data = rosidl::Buffer<uint8_t>(std::move(cuda_impl));
     return msg;
   }
 #endif
   if (dev == c10::kCPU) {
-    set_device(msg, {dlpack::kDLCPU, 0});
+    msg.device_type = static_cast<int32_t>(kDLCPU);
+    msg.device_id = 0;
     msg.data.resize(byte_count);
     return msg;
   }
@@ -302,157 +264,368 @@ inline TensorMsg allocate_tensor(
 }
 
 // ---------------------------------------------------------------------------
-// View construction
+// DLPack hand-off helpers (framework-agnostic producer API)
 // ---------------------------------------------------------------------------
 
 namespace detail
 {
 
-inline at::Tensor cpu_wrap(
-  void * ptr,
-  const std::vector<int64_t> & shape,
-  const std::vector<int64_t> & strides,
-  at::ScalarType dtype)
+/// Context held alive by the DLManagedTensor for the lifetime of the tensor
+/// constructed from it. Owns:
+///   - (CUDA builds only) a ReadHandle or WriteHandle that keeps the CUDA
+///     storage alive and drives event-based synchronization in
+///     cuda_buffer_backend, and
+///   - stable int64_t storage for DLTensor::shape / DLTensor::strides.
+struct BridgeDlCtx
 {
-  auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCPU);
-  return strides.empty() ?
-         torch::from_blob(ptr, shape, opts) :
-         torch::from_blob(ptr, shape, strides, opts);
+#ifdef TORCH_TENSOR_BRIDGE_HAS_CUDA
+  std::shared_ptr<cuda_buffer_backend::ReadHandle> rh;
+  std::shared_ptr<cuda_buffer_backend::WriteHandle> wh;
+#endif
+  std::vector<int64_t> shape;
+  std::vector<int64_t> strides;
+};
+
+/// C-style deleter used by every DLManagedTensor produced by the bridge.
+/// Called exactly once by the DLPack consumer (e.g. at::fromDLPack, or
+/// a framework's from_dlpack) when the imported tensor is destroyed.
+inline void bridge_dl_deleter(DLManagedTensor * self)
+{
+  if (!self) {return;}
+  delete static_cast<BridgeDlCtx *>(self->manager_ctx);
+  delete self;
 }
+
+/// Fill the DLTensor fields of `dlm` from `msg` and `ctx` + resolved pointer
+/// and device. Callers set `dlm->manager_ctx` and `dlm->deleter` themselves.
+///
+/// Note: we bake `msg.byte_offset` into the `data` pointer and set
+/// `dl_tensor.byte_offset = 0`. Per the DLPack spec both encodings describe
+/// the same tensor, but several DLPack importers (including some versions
+/// of torch's `at::fromDLPack`) ignore the `byte_offset` field and read
+/// from `data` directly, so baking it in is the portable choice.
+inline void fill_dl_tensor(
+  DLManagedTensor & dlm,
+  const TensorMsg & msg,
+  const BridgeDlCtx & ctx,
+  void * data_ptr,
+  int32_t dev_type)
+{
+  auto * offset_ptr = static_cast<uint8_t *>(data_ptr) + msg.byte_offset;
+  dlm.dl_tensor.data = static_cast<void *>(offset_ptr);
+  dlm.dl_tensor.device = DLDevice{static_cast<DLDeviceType>(dev_type), msg.device_id};
+  dlm.dl_tensor.ndim = static_cast<int32_t>(ctx.shape.size());
+  dlm.dl_tensor.dtype = DLDataType{msg.dtype_code, msg.dtype_bits, msg.dtype_lanes};
+  dlm.dl_tensor.shape = const_cast<int64_t *>(ctx.shape.data());
+  dlm.dl_tensor.strides = ctx.strides.empty() ?
+    nullptr : const_cast<int64_t *>(ctx.strides.data());
+  dlm.dl_tensor.byte_offset = 0;
+}
+
+}  // namespace detail
 
 #ifdef TORCH_TENSOR_BRIDGE_HAS_CUDA
 
-inline cudaStream_t current_cuda_stream(const char * ctx)
+/// Build a DLManagedTensor that references `msg`'s data for reading.
+/// The returned pointer is owned by the caller and must be either handed
+/// to a DLPack consumer that takes ownership (e.g. `at::fromDLPack`,
+/// `jax.dlpack.from_dlpack`, `cupy.from_dlpack`) or released via
+/// `dlm->deleter(dlm)`.
+///
+/// For CUDA-backed `msg.data`, a ReadHandle is acquired on `consumer_stream`
+/// (which calls `cudaStreamWaitEvent(consumer_stream, write_event)` to sync
+/// against the publisher). For CPU-backed data, `consumer_stream` is ignored.
+inline DLManagedTensor * make_dlpack_read(
+  const TensorMsg & msg,
+  cudaStream_t consumer_stream = nullptr)
 {
-  cudaStream_t s = at::cuda::getCurrentCUDAStream().stream();
-  if (s == nullptr) {
-    RCUTILS_LOG_WARN_NAMED(
-      "torch_tensor_bridge",
-      "%s: current CUDA stream is the default stream. "
-      "Set a non-default stream (e.g. via torch_tensor_bridge::set_stream()) "
-      "for event-based synchronization.",
-      ctx);
+  auto ctx = std::make_unique<detail::BridgeDlCtx>();
+  ctx->shape.assign(msg.shape.begin(), msg.shape.end());
+  ctx->strides.assign(msg.strides.begin(), msg.strides.end());
+
+  void * data_ptr = nullptr;
+  int32_t dev_type = kDLCPU;
+
+  const std::string & backend = msg.data.get_backend_type();
+  if (backend == "cuda") {
+    const auto * cuda_impl =
+      dynamic_cast<const cuda_buffer_backend::CudaBufferImpl<uint8_t> *>(
+      msg.data.get_impl());
+    if (!cuda_impl) {
+      throw std::runtime_error(
+              "torch_tensor_bridge::make_dlpack_read: cuda backend but not CudaBufferImpl");
+    }
+    ctx->rh = std::make_shared<cuda_buffer_backend::ReadHandle>(
+      cuda_impl->get_cuda_buffer().get_read_handle(consumer_stream));
+    data_ptr = const_cast<void *>(static_cast<const void *>(ctx->rh->get_ptr()));
+    dev_type = kDLCUDA;
+  } else if (backend == "cpu") {
+    (void)consumer_stream;
+    data_ptr = const_cast<void *>(static_cast<const void *>(msg.data.data()));
+    dev_type = kDLCPU;
+  } else {
+    throw std::runtime_error(
+            "torch_tensor_bridge::make_dlpack_read: unsupported backend '" +
+            backend + "'");
   }
-  return s;
+
+  auto * dlm = new DLManagedTensor;
+  detail::fill_dl_tensor(*dlm, msg, *ctx, data_ptr, dev_type);
+  dlm->manager_ctx = ctx.release();
+  dlm->deleter = detail::bridge_dl_deleter;
+  return dlm;
 }
 
-inline at::Tensor cuda_wrap_writable(
-  rosidl::Buffer<uint8_t> & data,
-  const std::vector<int64_t> & shape,
-  const std::vector<int64_t> & strides,
-  at::ScalarType dtype,
-  uint64_t byte_offset)
+/// Build a DLManagedTensor that references `msg`'s data for writing.
+/// Semantics are the mirror of `make_dlpack_read`: a WriteHandle is
+/// acquired for the CUDA path; the publisher's write event is recorded on
+/// `consumer_stream` when the imported tensor is destroyed.
+inline DLManagedTensor * make_dlpack_write(
+  TensorMsg & msg,
+  cudaStream_t consumer_stream = nullptr)
 {
-  auto * cuda_impl = const_cast<cuda_buffer_backend::CudaBufferImpl<uint8_t> *>(
-    dynamic_cast<const cuda_buffer_backend::CudaBufferImpl<uint8_t> *>(data.get_impl()));
-  if (!cuda_impl) {
+  auto ctx = std::make_unique<detail::BridgeDlCtx>();
+  ctx->shape.assign(msg.shape.begin(), msg.shape.end());
+  ctx->strides.assign(msg.strides.begin(), msg.strides.end());
+
+  void * data_ptr = nullptr;
+  int32_t dev_type = kDLCPU;
+
+  const std::string & backend = msg.data.get_backend_type();
+  if (backend == "cuda") {
+    auto * cuda_impl = const_cast<cuda_buffer_backend::CudaBufferImpl<uint8_t> *>(
+      dynamic_cast<const cuda_buffer_backend::CudaBufferImpl<uint8_t> *>(
+        msg.data.get_impl()));
+    if (!cuda_impl) {
+      throw std::runtime_error(
+              "torch_tensor_bridge::make_dlpack_write: cuda backend but not CudaBufferImpl");
+    }
+    cuda_impl->set_stream(consumer_stream);
+    ctx->wh = std::make_shared<cuda_buffer_backend::WriteHandle>(
+      cuda_impl->get_cuda_buffer().get_write_handle(consumer_stream));
+    data_ptr = static_cast<void *>(ctx->wh->get_ptr());
+    dev_type = kDLCUDA;
+  } else if (backend == "cpu") {
+    (void)consumer_stream;
+    data_ptr = static_cast<void *>(msg.data.data());
+    dev_type = kDLCPU;
+  } else {
     throw std::runtime_error(
-            "torch_tensor_bridge: from_tensor_msg (write) expected CUDA-backed data buffer");
+            "torch_tensor_bridge::make_dlpack_write: unsupported backend '" +
+            backend + "'");
   }
-  cudaStream_t stream = current_cuda_stream("from_tensor_msg (write)");
-  cuda_impl->set_stream(stream);
-  auto wh = std::make_shared<cuda_buffer_backend::WriteHandle>(
-    cuda_impl->get_cuda_buffer().get_write_handle(stream));
-  auto * base = static_cast<uint8_t *>(wh->get_ptr());
-  void * ptr = base + byte_offset;
-  auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
-  return strides.empty() ?
-         torch::from_blob(ptr, shape, [wh](void *) {}, opts) :
-         torch::from_blob(ptr, shape, strides, [wh](void *) {}, opts);
+
+  auto * dlm = new DLManagedTensor;
+  detail::fill_dl_tensor(*dlm, msg, *ctx, data_ptr, dev_type);
+  dlm->manager_ctx = ctx.release();
+  dlm->deleter = detail::bridge_dl_deleter;
+  return dlm;
 }
 
-inline at::Tensor cuda_wrap_readable(
-  const rosidl::Buffer<uint8_t> & data,
-  const std::vector<int64_t> & shape,
-  const std::vector<int64_t> & strides,
-  at::ScalarType dtype,
-  uint64_t byte_offset,
-  bool clone)
+#else  // TORCH_TENSOR_BRIDGE_HAS_CUDA
+
+/// CPU-only build: only `backend == "cpu"` msgs are supported.
+inline DLManagedTensor * make_dlpack_read(const TensorMsg & msg)
 {
-  const auto * cuda_impl = dynamic_cast<const cuda_buffer_backend::CudaBufferImpl<uint8_t> *>(
-    data.get_impl());
-  if (!cuda_impl) {
+  if (msg.data.get_backend_type() != "cpu") {
     throw std::runtime_error(
-            "torch_tensor_bridge: from_tensor_msg (read) expected CUDA-backed data buffer");
+            "torch_tensor_bridge: CUDA not compiled in; cannot handle '" +
+            msg.data.get_backend_type() + "' backend");
   }
-  cudaStream_t stream = current_cuda_stream("from_tensor_msg (read)");
-  auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
-  if (clone) {
-    auto rh = cuda_impl->get_cuda_buffer().get_read_handle(stream);
-    auto * base = const_cast<uint8_t *>(static_cast<const uint8_t *>(rh.get_ptr()));
-    void * ptr = base + byte_offset;
-    at::Tensor view = strides.empty() ?
-      torch::from_blob(ptr, shape, opts) :
-      torch::from_blob(ptr, shape, strides, opts);
-    return view.clone();
+  auto ctx = std::make_unique<detail::BridgeDlCtx>();
+  ctx->shape.assign(msg.shape.begin(), msg.shape.end());
+  ctx->strides.assign(msg.strides.begin(), msg.strides.end());
+
+  void * data_ptr = const_cast<void *>(static_cast<const void *>(msg.data.data()));
+
+  auto * dlm = new DLManagedTensor;
+  detail::fill_dl_tensor(*dlm, msg, *ctx, data_ptr, kDLCPU);
+  dlm->manager_ctx = ctx.release();
+  dlm->deleter = detail::bridge_dl_deleter;
+  return dlm;
+}
+
+inline DLManagedTensor * make_dlpack_write(TensorMsg & msg)
+{
+  if (msg.data.get_backend_type() != "cpu") {
+    throw std::runtime_error(
+            "torch_tensor_bridge: CUDA not compiled in; cannot handle '" +
+            msg.data.get_backend_type() + "' backend");
   }
-  auto rh = std::make_shared<cuda_buffer_backend::ReadHandle>(
-    cuda_impl->get_cuda_buffer().get_read_handle(stream));
-  auto * base = const_cast<uint8_t *>(static_cast<const uint8_t *>(rh->get_ptr()));
-  void * ptr = base + byte_offset;
-  return strides.empty() ?
-         torch::from_blob(ptr, shape, [rh](void *) {}, opts) :
-         torch::from_blob(ptr, shape, strides, [rh](void *) {}, opts);
+  auto ctx = std::make_unique<detail::BridgeDlCtx>();
+  ctx->shape.assign(msg.shape.begin(), msg.shape.end());
+  ctx->strides.assign(msg.strides.begin(), msg.strides.end());
+
+  void * data_ptr = static_cast<void *>(msg.data.data());
+
+  auto * dlm = new DLManagedTensor;
+  detail::fill_dl_tensor(*dlm, msg, *ctx, data_ptr, kDLCPU);
+  dlm->manager_ctx = ctx.release();
+  dlm->deleter = detail::bridge_dl_deleter;
+  return dlm;
 }
 
 #endif  // TORCH_TENSOR_BRIDGE_HAS_CUDA
+
+// ---------------------------------------------------------------------------
+// Overloaded producer-side entry point + RAII holder
+// ---------------------------------------------------------------------------
+
+/// Overloaded producer helper: dispatches to make_dlpack_read or
+/// make_dlpack_write based on const-ness of `msg`. Handy for framework
+/// bridges that don't care which direction they're in.
+#ifdef TORCH_TENSOR_BRIDGE_HAS_CUDA
+inline DLManagedTensor * to_dlpack(
+  const TensorMsg & msg, cudaStream_t consumer_stream = nullptr)
+{
+  return make_dlpack_read(msg, consumer_stream);
+}
+
+inline DLManagedTensor * to_dlpack(
+  TensorMsg & msg, cudaStream_t consumer_stream = nullptr)
+{
+  return make_dlpack_write(msg, consumer_stream);
+}
+#else
+inline DLManagedTensor * to_dlpack(const TensorMsg & msg)
+{
+  return make_dlpack_read(msg);
+}
+
+inline DLManagedTensor * to_dlpack(TensorMsg & msg)
+{
+  return make_dlpack_write(msg);
+}
+#endif
+
+/// RAII wrapper for a DLManagedTensor. Useful when you're not immediately
+/// handing the tensor off to a framework's `from_dlpack` (which would take
+/// ownership itself). Calling `.release()` hands the raw pointer to such a
+/// consumer.
+struct DlpackDeleter
+{
+  void operator()(DLManagedTensor * p) const noexcept
+  {
+    if (p && p->deleter) {p->deleter(p);}
+  }
+};
+
+using DlpackPtr = std::unique_ptr<DLManagedTensor, DlpackDeleter>;
+
+#ifdef TORCH_TENSOR_BRIDGE_HAS_CUDA
+inline DlpackPtr to_dlpack_owned(
+  const TensorMsg & msg, cudaStream_t consumer_stream = nullptr)
+{
+  return DlpackPtr{make_dlpack_read(msg, consumer_stream)};
+}
+
+inline DlpackPtr to_dlpack_owned(
+  TensorMsg & msg, cudaStream_t consumer_stream = nullptr)
+{
+  return DlpackPtr{make_dlpack_write(msg, consumer_stream)};
+}
+#else
+inline DlpackPtr to_dlpack_owned(const TensorMsg & msg)
+{
+  return DlpackPtr{make_dlpack_read(msg)};
+}
+
+inline DlpackPtr to_dlpack_owned(TensorMsg & msg)
+{
+  return DlpackPtr{make_dlpack_write(msg)};
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// Torch convenience wrappers on top of DLPack
+// ---------------------------------------------------------------------------
+
+namespace detail
+{
+
+inline DLManagedTensor * make_dlpack_read_current_stream(const TensorMsg & msg)
+{
+#ifdef TORCH_TENSOR_BRIDGE_HAS_CUDA
+  cudaStream_t s = nullptr;
+  if (msg.data.get_backend_type() == "cuda") {
+    s = current_cuda_stream("from_tensor_msg (read)");
+  }
+  return make_dlpack_read(msg, s);
+#else
+  return make_dlpack_read(msg);
+#endif
+}
+
+inline DLManagedTensor * make_dlpack_write_current_stream(TensorMsg & msg)
+{
+#ifdef TORCH_TENSOR_BRIDGE_HAS_CUDA
+  cudaStream_t s = nullptr;
+  if (msg.data.get_backend_type() == "cuda") {
+    s = current_cuda_stream("from_tensor_msg (write)");
+  }
+  return make_dlpack_write(msg, s);
+#else
+  return make_dlpack_write(msg);
+#endif
+}
 
 }  // namespace detail
 
 /// Get a writable at::Tensor view over msg.data + msg.byte_offset.
 /// The view shares memory with msg.data; the caller must ensure msg outlives
-/// the returned tensor.
+/// the returned tensor. Construction routes through `at::fromDLPack` so the
+/// consumer-side DLPack import path is exercised (device / dtype validation
+/// happens there).
 inline at::Tensor from_tensor_msg(TensorMsg & msg)
 {
   if (msg.data.empty()) {return {};}
-  std::vector<int64_t> shape(msg.shape.begin(), msg.shape.end());
-  std::vector<int64_t> strides(msg.strides.begin(), msg.strides.end());
-  at::ScalarType dtype = scalar_from_dl_dtype(get_dtype(msg));
-  const std::string & backend = msg.data.get_backend_type();
-#ifdef TORCH_TENSOR_BRIDGE_HAS_CUDA
-  if (backend == "cuda") {
-    return detail::cuda_wrap_writable(
-      msg.data, shape, strides, dtype, msg.byte_offset);
-  }
-#endif
-  if (backend == "cpu") {
-    auto * base = static_cast<uint8_t *>(msg.data.data());
-    void * ptr = base + msg.byte_offset;
-    return detail::cpu_wrap(ptr, shape, strides, dtype);
-  }
-  throw std::runtime_error(
-          "torch_tensor_bridge: unsupported data backend '" + backend + "'");
+  DlpackPtr guard{detail::make_dlpack_write_current_stream(msg)};
+  at::Tensor t = at::fromDLPack(guard.get());
+  (void)guard.release();
+  return t;
 }
 
 /// Get a read-only at::Tensor from msg.data + msg.byte_offset.
 /// \param clone If true (default), returns an independent copy. If false,
-/// returns a zero-copy view (for CUDA, a ReadHandle is kept alive via the
-/// tensor's deleter so event-based synchronization stays correct).
+/// returns a zero-copy view that keeps a ReadHandle alive via its deleter.
 inline at::Tensor from_tensor_msg(const TensorMsg & msg, bool clone = true)
 {
   if (msg.data.empty()) {return {};}
-  std::vector<int64_t> shape(msg.shape.begin(), msg.shape.end());
-  std::vector<int64_t> strides(msg.strides.begin(), msg.strides.end());
-  at::ScalarType dtype = scalar_from_dl_dtype(get_dtype(msg));
-  const std::string & backend = msg.data.get_backend_type();
-#ifdef TORCH_TENSOR_BRIDGE_HAS_CUDA
-  if (backend == "cuda") {
-    return detail::cuda_wrap_readable(
-      msg.data, shape, strides, dtype, msg.byte_offset, clone);
-  }
-#endif
-  if (backend == "cpu") {
-    auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCPU);
-    auto * base = const_cast<uint8_t *>(static_cast<const uint8_t *>(msg.data.data()));
-    void * ptr = base + msg.byte_offset;
-    at::Tensor view = strides.empty() ?
-      torch::from_blob(ptr, shape, opts) :
-      torch::from_blob(ptr, shape, strides, opts);
-    return clone ? view.clone() : view;
-  }
-  throw std::runtime_error(
-          "torch_tensor_bridge: unsupported data backend '" + backend + "'");
+  DlpackPtr guard{detail::make_dlpack_read_current_stream(msg)};
+  at::Tensor t = at::fromDLPack(guard.get());
+  (void)guard.release();
+  return clone ? t.clone() : t;
 }
+
+namespace detail
+{
+
+/// Populate shape / strides / dtype (plus byte_offset = 0) on `msg` from
+/// a torch tensor, using `at::toDLPack` to derive the DLPack-form metadata.
+/// Device fields on `msg` are intentionally NOT touched: they describe where
+/// msg.data physically lives, which is fixed at allocation time and may
+/// differ from the source tensor's device.
+inline void fill_metadata_via_dlpack(TensorMsg & msg, const at::Tensor & t)
+{
+  DLManagedTensor * dlm = at::toDLPack(t);
+  const DLTensor & dt = dlm->dl_tensor;
+
+  msg.shape.assign(dt.shape, dt.shape + dt.ndim);
+  if (dt.strides) {
+    msg.strides.assign(dt.strides, dt.strides + dt.ndim);
+  } else {
+    // DLPack null strides == row-major contiguous; materialize explicit ones.
+    msg.strides = contiguous_strides(msg.shape);
+  }
+  msg.dtype_code = dt.dtype.code;
+  msg.dtype_bits = dt.dtype.bits;
+  msg.dtype_lanes = dt.dtype.lanes;
+  msg.byte_offset = 0;
+
+  if (dlm->deleter) {dlm->deleter(dlm);}
+}
+
+}  // namespace detail
 
 /// Copy `tensor` into msg.data (pre-allocated, with the same device as the
 /// source tensor's) and refresh msg metadata to the contiguous form.
@@ -493,12 +666,7 @@ inline void to_tensor_msg(TensorMsg & msg, const at::Tensor & tensor)
             "torch_tensor_bridge::to_tensor_msg: unsupported backend '" + backend + "'");
   }
 
-  auto sizes = contig.sizes().vec();
-  auto strides = contig.strides().vec();
-  msg.shape.assign(sizes.begin(), sizes.end());
-  msg.strides.assign(strides.begin(), strides.end());
-  set_dtype(msg, dl_dtype_from_scalar(contig.scalar_type()));
-  msg.byte_offset = 0;
+  detail::fill_metadata_via_dlpack(msg, contig);
 }
 
 }  // namespace torch_tensor_bridge

@@ -62,7 +62,7 @@ private:
     }
 
     const bool is_uint8 =
-      msg->dtype_code == torch_tensor_bridge::dlpack::kDLUInt &&
+      msg->dtype_code == static_cast<uint8_t>(kDLUInt) &&
       msg->dtype_bits == 8u &&
       msg->dtype_lanes == 1u;
     if (!is_uint8) {
