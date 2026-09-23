@@ -159,3 +159,5 @@ The publisher's pool checks a shared-memory refcount before recycling a block, e
 ## License
 
 Apache-2.0
+
+Rust: [cuda_buffer_rs](cuda_buffer_rs/README.md).

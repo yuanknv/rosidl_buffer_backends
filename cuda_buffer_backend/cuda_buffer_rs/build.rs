@@ -1,0 +1,58 @@
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn cuda_search_path(path: &Path) {
+    if path.is_dir() {
+        println!("cargo:rustc-link-search=native={}", path.display());
+        println!("cargo:rustc-link-arg=-Wl,-rpath-link,{}", path.display());
+    }
+}
+
+fn main() {
+    let mut directories = Vec::new();
+    println!("cargo:rerun-if-env-changed=AMENT_PREFIX_PATH");
+    if let Some(prefixes) = env::var_os("AMENT_PREFIX_PATH") {
+        directories.extend(env::split_paths(&prefixes).map(|prefix| prefix.join("lib")));
+    }
+    println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
+    if let Some(prefix) = env::var_os("CONDA_PREFIX") {
+        directories.push(PathBuf::from(prefix).join("lib"));
+    }
+
+    // Resolve each library before Rustdoc sorts its search paths.
+    let links =
+        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set")).join("native-libraries");
+    fs::create_dir_all(&links).expect("create native library directory");
+    for library in ["cuda_buffer", "rosidl_buffer"] {
+        let filename = format!("lib{library}.so");
+        let source = directories
+            .iter()
+            .map(|directory| directory.join(&filename))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| panic!("{library} is missing from AMENT_PREFIX_PATH"));
+        let target = links.join(filename);
+        if target.symlink_metadata().is_ok() {
+            fs::remove_file(&target).expect("remove previous native library link");
+        }
+        std::os::unix::fs::symlink(
+            fs::canonicalize(&source).expect("resolve native library"),
+            target,
+        )
+        .expect("link native library");
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath-link,{}",
+            source.parent().unwrap().display()
+        );
+        println!("cargo:rustc-link-lib=dylib={library}");
+    }
+    println!("cargo:rustc-link-search=native={}", links.display());
+
+    for variable in ["CUDA_TOOLKIT_PATH", "CUDA_HOME", "CUDA_PATH"] {
+        println!("cargo:rerun-if-env-changed={variable}");
+        if let Some(root) = env::var_os(variable) {
+            cuda_search_path(&PathBuf::from(root).join("lib64"));
+        }
+    }
+    cuda_search_path(Path::new("/usr/local/cuda/lib64"));
+}
