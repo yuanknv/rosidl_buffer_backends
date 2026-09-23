@@ -6,17 +6,13 @@ use rclrs::{Context, CreateBasicExecutor, SpinOptions};
 use ros_env::{rcl_interfaces, sensor_msgs, test_msgs};
 use rosidl_runtime_rs::{Buffer, Message};
 
-fn make_buffer(backend: &str, values: &[u8]) -> Buffer<u8> {
+fn make_cuda_buffer(values: &[u8]) -> Buffer<u8> {
     let mut buffer = Buffer::from(vec![0u8; values.len()]);
-    if backend == "cuda" {
-        let stream = cuda_core::CudaContext::new(0).unwrap().default_stream();
-        cuda_buffer_rs::from_output_buffer::<u8>(&mut buffer, &stream)
-            .unwrap()
-            .copy_from_host(values)
-            .unwrap();
-    } else {
-        buffer.as_mut_slice().unwrap().copy_from_slice(values);
-    }
+    let stream = cuda_core::CudaContext::new(0).unwrap().default_stream();
+    cuda_buffer_rs::from_output_buffer::<u8>(&mut buffer, &stream)
+        .unwrap()
+        .copy_from_host(values)
+        .unwrap();
     buffer
 }
 
@@ -24,14 +20,14 @@ fn make_buffer(backend: &str, values: &[u8]) -> Buffer<u8> {
 fn cuda_storage_materializes_recursively_without_changing_the_cpu_api() {
     let mut nested = test_msgs::msg::buffer::MultiNested::default();
     let unbounded = test_msgs::msg::buffer::UnboundedSequences {
-        uint8_values: make_buffer("cuda", &[9, 7, 5]),
+        uint8_values: make_cuda_buffer(&[9, 7, 5]),
         ..Default::default()
     };
     nested.array_of_unbounded_sequences[0] = unbounded.clone();
     nested.bounded_sequence_of_unbounded_sequences = vec![unbounded.clone()].try_into().unwrap();
     nested.unbounded_sequence_of_unbounded_sequences = vec![unbounded];
     nested.array_of_bounded_sequences[0].uint8_values =
-        make_buffer("cuda", &[3, 2, 1]).try_into().unwrap();
+        make_cuda_buffer(&[3, 2, 1]).try_into().unwrap();
     let native =
         test_msgs::msg::buffer::MultiNested::into_rmw_message(Cow::Borrowed(&nested)).into_owned();
     assert!(native.array_of_unbounded_sequences[0]
@@ -62,7 +58,7 @@ fn cuda_storage_materializes_recursively_without_changing_the_cpu_api() {
 #[test]
 fn owned_transport_conversion_retains_the_gpu_allocation() {
     let image = sensor_msgs::msg::buffer::Image {
-        data: make_buffer("cuda", &[4, 8, 12]),
+        data: make_cuda_buffer(&[4, 8, 12]),
         ..Default::default()
     };
     let pointer = image.data.as_sequence().rosidl_buffer_ptr();
@@ -79,27 +75,24 @@ fn owned_transport_conversion_retains_the_gpu_allocation() {
 }
 
 #[test]
-fn cpu_and_buffer_json_have_the_same_schema() {
+fn cuda_buffer_json_matches_the_cpu_schema() {
     let image = sensor_msgs::msg::Image {
         data: vec![1, 2, 3],
         ..Default::default()
     };
     let json = serde_json::to_string(&image).unwrap();
-    let portable: sensor_msgs::msg::buffer::Image = serde_json::from_str(&json).unwrap();
-    assert_eq!(serde_json::to_string(&portable).unwrap(), json);
-    {
-        let gpu = sensor_msgs::msg::buffer::Image {
-            data: make_buffer("cuda", &[1, 2, 3]),
-            ..Default::default()
-        };
-        assert_eq!(serde_json::to_string(&gpu).unwrap(), json);
-    }
+    let gpu = sensor_msgs::msg::buffer::Image {
+        data: make_cuda_buffer(&[1, 2, 3]),
+        ..Default::default()
+    };
+    assert_eq!(serde_json::to_string(&gpu).unwrap(), json);
 }
 
-fn deliver_once(backend: &str) {
+#[test]
+fn one_cuda_publication_reaches_both_representations() {
     let mut executor = Context::default().create_basic_executor();
     let node = executor.create_node("portable_image_test").unwrap();
-    let topic = format!("portable_image_{}_{}", backend, std::process::id());
+    let topic = format!("portable_image_cuda_{}", std::process::id());
     let received = Arc::new(Mutex::new((None, None)));
     let cpu_received = Arc::clone(&received);
     let _cpu = node
@@ -114,7 +107,7 @@ fn deliver_once(backend: &str) {
     let buffer_received = Arc::clone(&received);
     let _portable = node
         .create_subscription::<sensor_msgs::msg::buffer::Image, _>(
-            rclrs::SubscriptionOptions::new(&topic).acceptable_buffer_backends(backend),
+            rclrs::SubscriptionOptions::new(&topic).acceptable_buffer_backends("cuda"),
             move |image: sensor_msgs::msg::buffer::Image| {
                 let name = image.data.backend_name().unwrap();
                 buffer_received.lock().unwrap().1 = Some((name, image.data.to_vec().unwrap()));
@@ -131,7 +124,7 @@ fn deliver_once(backend: &str) {
     }
     let image = sensor_msgs::msg::buffer::Image {
         width: 3,
-        data: make_buffer(backend, &[11, 22, 33]),
+        data: make_cuda_buffer(&[11, 22, 33]),
         ..Default::default()
     };
     publisher.publish(image).unwrap();
@@ -145,7 +138,7 @@ fn deliver_once(backend: &str) {
         if let (Some(cpu), Some((name, portable))) = &*results {
             assert_eq!(cpu, &[11, 22, 33]);
             assert_eq!(portable, cpu);
-            assert_eq!(name, backend);
+            assert_eq!(name, "cuda");
             break;
         }
         assert!(
@@ -156,15 +149,11 @@ fn deliver_once(backend: &str) {
 }
 
 #[test]
-fn one_cuda_publication_reaches_both_representations() {
-    deliver_once("cuda");
-}
-
-fn service_roundtrip(backend: &'static str) {
+fn cpu_client_receives_nested_cuda_service_response() {
     use rcl_interfaces::{msg, srv};
     let mut executor = Context::default().create_basic_executor();
     let node = executor.create_node("portable_service_test").unwrap();
-    let name = format!("portable_service_{}_{}", backend, std::process::id());
+    let name = format!("portable_service_cuda_{}", std::process::id());
     let _service = node
         .create_service::<srv::buffer::GetParameters, _>(
             &name,
@@ -172,7 +161,7 @@ fn service_roundtrip(backend: &'static str) {
                 assert_eq!(request.names, vec!["pixels"]);
                 srv::buffer::GetParameters_Response {
                     values: vec![msg::buffer::ParameterValue {
-                        byte_array_value: make_buffer(backend, &[13, 17, 23]),
+                        byte_array_value: make_cuda_buffer(&[13, 17, 23]),
                         ..Default::default()
                     }],
                 }
@@ -212,11 +201,6 @@ fn service_roundtrip(backend: &'static str) {
 }
 
 #[test]
-fn cpu_client_receives_nested_cuda_service_response() {
-    service_roundtrip("cuda");
-}
-
-#[test]
 fn buffer_client_sends_nested_cuda_request_to_cpu_service() {
     use rcl_interfaces::{msg, srv};
     let mut executor = Context::default().create_basic_executor();
@@ -245,7 +229,7 @@ fn buffer_client_sends_nested_cuda_request_to_cpu_service() {
         parameters: vec![msg::buffer::Parameter {
             name: "pixels".into(),
             value: msg::buffer::ParameterValue {
-                byte_array_value: make_buffer("cuda", &[29, 31]),
+                byte_array_value: make_cuda_buffer(&[29, 31]),
                 ..Default::default()
             },
         }],

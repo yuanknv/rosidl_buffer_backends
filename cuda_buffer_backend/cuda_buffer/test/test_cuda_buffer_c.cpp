@@ -64,24 +64,15 @@ protected:
   cudaStream_t stream_{nullptr};
 };
 
-TEST_F(CudaBufferCApiTest, AllocateReportsCudaBackendAndDestroys)
-{
-  void * buffer = nullptr;
-  ASSERT_EQ(cuda_buffer_allocate(256, &buffer), CUDA_BUFFER_RET_OK);
-  ASSERT_NE(buffer, nullptr);
-  EXPECT_TRUE(cuda_buffer_is_cuda_backed(buffer));
-
-  auto * typed = static_cast<rosidl::Buffer<uint8_t> *>(buffer);
-  EXPECT_EQ(typed->size(), 256u);
-  EXPECT_EQ(typed->get_backend_type(), "cuda");
-
-  rosidl_buffer_uint8_destroy(buffer);
-}
-
 TEST_F(CudaBufferCApiTest, WriteThenReadRoundTripsDeviceData)
 {
   void * buffer = nullptr;
   ASSERT_EQ(cuda_buffer_allocate(512, &buffer), CUDA_BUFFER_RET_OK);
+  ASSERT_NE(buffer, nullptr);
+  EXPECT_TRUE(cuda_buffer_is_cuda_backed(buffer));
+  const auto * typed = static_cast<const rosidl::Buffer<uint8_t> *>(buffer);
+  EXPECT_EQ(typed->size(), 512u);
+  EXPECT_EQ(typed->get_backend_type(), "cuda");
 
   const std::vector<uint8_t> expected = pattern(512, 7);
 

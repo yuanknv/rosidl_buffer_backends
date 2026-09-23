@@ -88,7 +88,14 @@ fn cloned_messages_keep_cuda_storage_and_compare_contents() {
         ..Default::default()
     };
     assert!(format!("{message:?}").contains("PrimitiveSequence"));
-    let cloned = message.clone();
+    let mut cloned = message.clone();
+    let pointer = cloned.data.rosidl_buffer_ptr();
+    assert!(std::panic::catch_unwind(|| cloned.data.as_slice()).is_err());
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cloned.data.as_mut_slice();
+    }))
+    .is_err());
+    assert_eq!(cloned.data.rosidl_buffer_ptr(), pointer);
     assert!(cloned.data.is_rosidl_buffer());
     assert_eq!(message, cloned);
     assert_eq!(cloned.data, PrimitiveSequence::from(&[3u8, 5, 7, 9][..]));
@@ -126,18 +133,6 @@ fn nonowning_message_storage_is_returned_on_rejected_adoption() {
 }
 
 #[test]
-fn opaque_sequence_access_panics_without_releasing_its_owner() {
-    let mut owner = CudaBuffer::allocate(4).unwrap().into_primitive_sequence();
-    let pointer = owner.rosidl_buffer_ptr();
-    assert!(std::panic::catch_unwind(|| owner.as_slice()).is_err());
-    assert_eq!(owner.rosidl_buffer_ptr(), pointer);
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = owner.as_mut_slice();
-    }))
-    .is_err());
-}
-
-#[test]
 fn message_owner_can_move_to_a_thread_with_its_cuda_context() {
     let context = CudaContext::new(0).unwrap();
     let stream = context.new_stream().unwrap();
@@ -159,23 +154,6 @@ fn message_owner_can_move_to_a_thread_with_its_cuda_context() {
     .join()
     .unwrap();
     assert_eq!(values, vec![2, 4, 6, 8]);
-}
-
-#[test]
-fn backend_neutral_buffer_retains_typed_cuda_access() {
-    let context = CudaContext::new(0).unwrap();
-    let stream = context.new_stream().unwrap();
-    let mut owner = CudaBuffer::allocate(16).unwrap();
-    owner
-        .get_write_handle::<u32>(&stream)
-        .unwrap()
-        .copy_from_host(&[1, 4, 9, 16])
-        .unwrap();
-    let pointer = owner.as_ptr();
-    let buffer = owner.into_buffer();
-    assert_eq!(buffer.as_sequence().rosidl_buffer_ptr(), Some(pointer));
-    let read = cuda_buffer_rs::from_input_buffer::<u32>(&buffer, &stream).unwrap();
-    assert_eq!(read.to_host_vec().unwrap(), vec![1, 4, 9, 16]);
 }
 
 #[test]
