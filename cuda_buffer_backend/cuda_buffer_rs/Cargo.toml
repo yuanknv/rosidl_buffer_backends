@@ -26,22 +26,6 @@ rclrs = { version = "0.7", features = ["serde"] }
 ros-env = "=0.2.0"
 serde_json = "1"
 
-[[test]]
-name = "cuda_core"
-required-features = ["cuda-core"]
-
-[[test]]
-name = "pubsub"
-required-features = ["cuda-core"]
-
-[[test]]
-name = "sequence"
-required-features = ["cuda-core"]
-
-[[test]]
-name = "buffer_messages"
-required-features = ["cuda-core"]
-
 [[example]]
 name = "cuda_image_publisher"
 required-features = ["cuda-core"]
@@ -51,5 +35,17 @@ name = "cuda_image_subscriber"
 required-features = ["cuda-core"]
 
 [[test]]
-name = "copy"
+name = "intra_process"
+required-features = ["cuda-core"]
+
+[[test]]
+name = "inter_process"
+required-features = ["cuda-core"]
+
+[[test]]
+name = "cpu_fallback"
+required-features = ["cuda-core"]
+
+[[test]]
+name = "message_compatibility"
 required-features = ["cuda-core"]

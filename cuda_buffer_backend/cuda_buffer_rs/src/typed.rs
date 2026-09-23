@@ -524,31 +524,3 @@ pub fn from_output_buffer<'a, T: DeviceCopy>(
     *buffer = promoted.into_buffer();
     Ok(write)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn checked_element_counts() {
-        assert!(element_count::<()>(4).is_err());
-        assert!(element_count::<u32>(0).is_err());
-        assert!(element_count::<u32>(7).is_err());
-        assert_eq!(element_count::<u32>(16).unwrap(), 4);
-    }
-
-    #[test]
-    fn failed_facade_construction_drops_native_handle() {
-        struct Native(std::rc::Rc<std::cell::Cell<usize>>);
-        impl Drop for Native {
-            fn drop(&mut self) {
-                self.0.set(self.0.get() + 1);
-            }
-        }
-        let drops = std::rc::Rc::new(std::cell::Cell::new(0));
-        let stream = cuda_core::CudaContext::new(0).unwrap().default_stream();
-        for address in [0, 1] {
-            assert!(Access::<u32, _>::new(Native(drops.clone()), address, 1, &stream).is_err());
-        }
-        assert_eq!(drops.get(), 2);
-    }
-}

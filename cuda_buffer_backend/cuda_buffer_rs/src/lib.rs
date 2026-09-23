@@ -444,3 +444,6 @@ pub fn read_primitive_sequence(
     let handle = unsafe { ReadHandle::acquire(raw, stream) }?;
     Ok(handle)
 }
+
+#[cfg(test)]
+mod tests;

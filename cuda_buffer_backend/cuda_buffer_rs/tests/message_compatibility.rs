@@ -92,66 +92,6 @@ fn cuda_buffer_json_matches_the_cpu_schema() {
 }
 
 #[test]
-fn one_cuda_publication_reaches_both_representations() {
-    let mut executor = Context::default().create_basic_executor();
-    let node = executor.create_node("portable_image_test").unwrap();
-    let topic = format!("portable_image_cuda_{}", std::process::id());
-    let received = Arc::new(Mutex::new((None, None)));
-    let cpu_received = Arc::clone(&received);
-    let _cpu = node
-        .create_subscription::<sensor_msgs::msg::Image, _>(
-            &topic,
-            move |image: sensor_msgs::msg::Image| {
-                assert_eq!(image.width, 3);
-                cpu_received.lock().unwrap().0 = Some(image.data);
-            },
-        )
-        .unwrap();
-    let buffer_received = Arc::clone(&received);
-    let _portable = node
-        .create_subscription::<sensor_msgs::msg::buffer::Image, _>(
-            rclrs::SubscriptionOptions::new(&topic).acceptable_buffer_backends("cuda"),
-            move |image: sensor_msgs::msg::buffer::Image| {
-                let name = image.data.backend_name().unwrap();
-                buffer_received.lock().unwrap().1 = Some((name, image.data.to_vec().unwrap()));
-            },
-        )
-        .unwrap();
-    let publisher = node
-        .create_publisher::<sensor_msgs::msg::buffer::Image>(&topic)
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while publisher.get_subscription_count().unwrap() < 2 {
-        assert!(Instant::now() < deadline, "subscriber discovery timed out");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let image = sensor_msgs::msg::buffer::Image {
-        width: 3,
-        data: make_cuda_buffer(&[11, 22, 33]),
-        ..Default::default()
-    };
-    publisher.publish(image).unwrap();
-    loop {
-        let errors = executor.spin(SpinOptions::spin_once().timeout(Duration::from_millis(20)));
-        assert!(
-            errors.iter().all(rclrs::RclrsError::is_timeout),
-            "{errors:?}"
-        );
-        let results = received.lock().unwrap();
-        if let (Some(cpu), Some((name, portable))) = &*results {
-            assert_eq!(cpu, &[11, 22, 33]);
-            assert_eq!(portable, cpu);
-            assert_eq!(name, "cuda");
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "one publication did not reach both representations: {results:?}"
-        );
-    }
-}
-
-#[test]
 fn cpu_client_receives_nested_cuda_service_response() {
     use rcl_interfaces::{msg, srv};
     let mut executor = Context::default().create_basic_executor();
