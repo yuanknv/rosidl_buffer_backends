@@ -1,3 +1,6 @@
+// Copyright 2026 Open Source Robotics Foundation, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Scoped Rust access to native CUDA buffers.
 //!
 //! `CudaBuffer` owns the native allocation. Guards borrow it while native events

@@ -1,3 +1,6 @@
+// Copyright 2026 Open Source Robotics Foundation, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use std::ffi::c_void;
 
 use cuda_buffer_rs::{get_primitive_sequence_read_handle, CudaBuffer, CudaStream, ErrorKind};

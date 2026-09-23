@@ -1,3 +1,6 @@
+// Copyright 2026 Open Source Robotics Foundation, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Typed cuda-core access to backend-owned VMM storage.
 
 use std::borrow::Cow;

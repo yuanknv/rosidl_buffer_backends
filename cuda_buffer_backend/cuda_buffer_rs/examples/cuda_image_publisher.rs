@@ -1,3 +1,6 @@
+// Copyright 2026 Open Source Robotics Foundation, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Publish CUDA-backed images through the output-buffer adapter.
 use std::sync::Arc;
 use std::time::Duration;

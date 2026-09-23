@@ -1,3 +1,6 @@
+// Copyright 2026 Open Source Robotics Foundation, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Raw declarations for the `cuda_buffer` C ABI.
 //!
 //! `buffer` arguments are opaque `rosidl::Buffer<uint8_t> *` values and

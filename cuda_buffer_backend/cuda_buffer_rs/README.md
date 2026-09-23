@@ -1,3 +1,8 @@
+<!--
+Copyright 2026 Open Source Robotics Foundation, Inc.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # cuda_buffer_rs
 
 Rust access to ROS CUDA buffers for publishing and consuming GPU data.
