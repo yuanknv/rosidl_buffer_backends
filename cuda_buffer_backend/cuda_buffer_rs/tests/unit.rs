@@ -1,11 +1,11 @@
 // Copyright 2026 Open Source Robotics Foundation, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{CudaBuffer, CudaStream, ErrorKind};
+use cuda_buffer_rs::{CudaBuffer, CudaStream, ErrorKind};
 
 #[test]
 fn raw_guards_share_device_memory_and_finalize_one_write() {
-    let internal = crate::internal_stream().unwrap();
+    let internal = cuda_buffer_rs::internal_stream().unwrap();
     assert!(!internal.as_raw().is_null());
     assert!(!internal.is_internal());
     assert!(CudaStream::INTERNAL.is_internal());
@@ -41,7 +41,7 @@ fn raw_and_sequence_conversions_transfer_ownership() {
     let sequence = buffer.into_primitive_sequence();
     assert_eq!(sequence.rosidl_buffer_ptr(), Some(raw));
     assert_eq!(sequence.len(), 512);
-    let guard = crate::read_primitive_sequence(&sequence, CudaStream::INTERNAL).unwrap();
+    let guard = cuda_buffer_rs::read_primitive_sequence(&sequence, CudaStream::INTERNAL).unwrap();
     assert_eq!(guard.len(), 512);
     assert!(!guard.device_ptr().is_null());
     drop(guard);
@@ -67,16 +67,17 @@ fn empty_buffers_reject_guards_and_errors_survive_later_ffi_calls() {
         buffer.write(CudaStream::INTERNAL).unwrap_err().kind,
         ErrorKind::InvalidArgument
     );
-    let _stream = crate::internal_stream().unwrap();
+    let _stream = cuda_buffer_rs::internal_stream().unwrap();
     assert_eq!(error.message, message);
     assert!(error.to_string().contains(&message));
-    assert!(!unsafe { crate::is_cuda_backed(std::ptr::null()) });
+    assert!(!unsafe { cuda_buffer_rs::is_cuda_backed(std::ptr::null()) });
 }
 
 #[test]
 fn normal_sequences_are_returned_on_rejected_adoption() {
     let sequence = rosidl_runtime_rs::PrimitiveSequence::from(&[1u8, 2, 3][..]);
-    let error = crate::read_primitive_sequence(&sequence, CudaStream::INTERNAL).unwrap_err();
+    let error =
+        cuda_buffer_rs::read_primitive_sequence(&sequence, CudaStream::INTERNAL).unwrap_err();
     assert_eq!(error.kind, ErrorKind::InvalidArgument);
     let sequence = CudaBuffer::from_primitive_sequence(sequence).unwrap_err();
     assert_eq!(sequence.as_slice(), &[1, 2, 3]);
@@ -85,7 +86,9 @@ fn normal_sequences_are_returned_on_rejected_adoption() {
 #[cfg(feature = "cuda-core")]
 mod typed {
     use super::*;
-    use crate::{allocate_buffer, from_input_buffer, from_output_buffer, to_buffer, CopyKind};
+    use cuda_buffer_rs::{
+        allocate_buffer, from_input_buffer, from_output_buffer, to_buffer, CopyKind,
+    };
     use cuda_core::{CudaContext, DeviceBuffer};
     use std::ffi::c_void;
     use std::mem::size_of_val;

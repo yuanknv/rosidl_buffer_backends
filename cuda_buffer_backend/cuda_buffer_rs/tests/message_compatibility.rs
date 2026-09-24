@@ -20,7 +20,7 @@ fn make_cuda_buffer(values: &[u8]) -> Buffer<u8> {
 }
 
 #[test]
-fn cuda_storage_materializes_recursively_without_changing_the_cpu_api() {
+fn nested_cuda_fields_convert_to_cpu() {
     let mut nested = test_msgs::msg::buffer::MultiNested::default();
     let unbounded = test_msgs::msg::buffer::UnboundedSequences {
         uint8_values: make_cuda_buffer(&[9, 7, 5]),
@@ -59,7 +59,7 @@ fn cuda_storage_materializes_recursively_without_changing_the_cpu_api() {
 }
 
 #[test]
-fn owned_transport_conversion_retains_the_gpu_allocation() {
+fn owned_message_roundtrip_preserves_buffer_owner() {
     let image = sensor_msgs::msg::buffer::Image {
         data: make_cuda_buffer(&[4, 8, 12]),
         ..Default::default()

@@ -8,14 +8,13 @@
 //! access using retained cuda-core streams. Buffers and handles are thread-local.
 
 #![warn(unsafe_op_in_unsafe_fn)]
-#![cfg_attr(feature = "cuda-core", doc = include_str!("README.md"))]
 
 pub mod ffi;
 
 #[cfg(feature = "cuda-core")]
-mod typed;
+mod cuda_core_adapter;
 #[cfg(feature = "cuda-core")]
-pub use typed::{
+pub use cuda_core_adapter::{
     from_input_buffer, from_output_buffer, get_primitive_sequence_read_handle, to_buffer, CopyKind,
     CudaReadHandle, CudaWriteHandle,
 };
@@ -258,11 +257,6 @@ impl Drop for WriteHandle {
 /// An owned `rosidl::Buffer<uint8_t>` allocated or adopted from the C++ backend.
 ///
 /// Drop releases the owner through `rosidl_buffer_uint8_destroy`.
-///
-/// ```compile_fail
-/// fn require_send<T: Send>() {}
-/// require_send::<cuda_buffer_rs::CudaBuffer>();
-/// ```
 #[must_use]
 pub struct CudaBuffer {
     raw: NonNull<c_void>,
@@ -347,29 +341,13 @@ impl CudaBuffer {
 
     /// Acquire scoped read access ordered on `stream`.
     ///
-    /// The owner remains borrowed through automatic read-handle cleanup:
-    /// ```compile_fail
-    /// use cuda_buffer_rs::{CudaBuffer, CudaStream};
-    /// let buffer = CudaBuffer::allocate(16).unwrap();
-    /// let read = buffer.read(CudaStream::INTERNAL).unwrap();
-    /// let _ = read.device_ptr();
-    /// drop(buffer);
-    /// ```
+    /// The handle borrows its owner through cleanup.
     pub fn read(&self, stream: CudaStream) -> Result<CudaReadGuard<'_>> {
         let handle = unsafe { ReadHandle::acquire(self.raw.as_ptr(), stream) }?;
         Ok(handle)
     }
 
     /// Acquire scoped write access ordered on `stream`.
-    ///
-    /// ```compile_fail
-    /// use cuda_buffer_rs::{CudaBuffer, CudaStream};
-    /// let mut buffer = CudaBuffer::allocate(16).unwrap();
-    /// let write = buffer.write(CudaStream::INTERNAL).unwrap();
-    /// let read = buffer.read(CudaStream::INTERNAL).unwrap();
-    /// drop(write);
-    /// drop(read);
-    /// ```
     ///
     /// If the buffer was adopted from non-CUDA storage it is promoted and this
     /// `CudaBuffer` takes ownership of the promoted allocation, destroying the
@@ -445,5 +423,6 @@ pub fn read_primitive_sequence(
     Ok(handle)
 }
 
-#[cfg(test)]
-mod tests;
+#[cfg(doctest)]
+#[path = "../tests/compile_fail_doctests/mod.rs"]
+mod compile_fail_doctests;

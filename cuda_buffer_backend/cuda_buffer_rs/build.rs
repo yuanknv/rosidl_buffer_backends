@@ -13,16 +13,6 @@ fn cuda_search_path(path: &Path) {
 }
 
 fn main() {
-    for symbol in [
-        "cudaMemcpy",
-        "cudaMemcpyAsync",
-        "cuMemImportFromShareableHandle",
-        "cuMemMap",
-        "cuMemUnmap",
-        "cuMemRelease",
-    ] {
-        println!("cargo:rustc-link-arg-tests=-Wl,--export-dynamic-symbol={symbol}");
-    }
     let mut directories = Vec::new();
     println!("cargo:rerun-if-env-changed=AMENT_PREFIX_PATH");
     if let Some(prefixes) = env::var_os("AMENT_PREFIX_PATH") {

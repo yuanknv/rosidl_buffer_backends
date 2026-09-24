@@ -117,14 +117,6 @@ impl<T, H> Drop for Access<T, H> {
 ///
 /// Enable the `cuda-core` feature. CUDA input retains its device storage; CPU
 /// input is promoted. The native handle orders access on [`Self::stream`].
-///
-/// A read handle cannot provide mutable device access:
-/// ```compile_fail
-/// use cuda_buffer_rs::CudaReadHandle;
-/// fn mutate(handle: &mut CudaReadHandle<'_, u32>) {
-///     handle.as_device_buffer_mut();
-/// }
-/// ```
 #[must_use]
 pub struct CudaReadHandle<'a, T: DeviceCopy> {
     access: Access<T, ReadHandle<'a>>,
@@ -136,15 +128,6 @@ pub struct CudaReadHandle<'a, T: DeviceCopy> {
 /// The backend permits one write phase, followed by read phases. Read access,
 /// serialization, or owner destruction finalizes a floating write. Handle drop
 /// finalizes any remaining write; acquire a new buffer for subsequent writes.
-///
-/// Safe Rust cannot extract an owning cuda-core allocation:
-/// ```compile_fail
-/// use cuda_buffer_rs::CudaWriteHandle;
-/// use cuda_core::DeviceBuffer;
-/// fn steal(handle: &mut CudaWriteHandle<'_, u32>, replacement: DeviceBuffer<u32>) {
-///     let stolen = std::mem::replace(handle.as_device_buffer_mut(), replacement);
-/// }
-/// ```
 #[must_use]
 pub struct CudaWriteHandle<'a, T: DeviceCopy> {
     access: Access<T, WriteHandle>,
@@ -154,16 +137,7 @@ pub struct CudaWriteHandle<'a, T: DeviceCopy> {
 impl CudaBuffer {
     /// Acquire typed read access on the exact cuda-core stream (including 0).
     ///
-    /// The owner cannot be dropped while its handle is live:
-    /// ```compile_fail
-    /// use cuda_buffer_rs::CudaBuffer;
-    /// use cuda_core::CudaContext;
-    /// let stream = CudaContext::new(0).unwrap().default_stream();
-    /// let buffer = CudaBuffer::allocate(16).unwrap();
-    /// let handle = buffer.get_read_handle::<u32>(&stream).unwrap();
-    /// drop(buffer);
-    /// let _ = handle.to_host_vec();
-    /// ```
+    /// The handle borrows its owner until drop.
     pub fn get_read_handle<T: DeviceCopy>(
         &self,
         stream: &Arc<CudaStream>,
@@ -174,25 +148,7 @@ impl CudaBuffer {
 
     /// Acquire typed exclusive write access on the exact cuda-core stream.
     ///
-    /// ```compile_fail
-    /// use cuda_buffer_rs::CudaBuffer;
-    /// use cuda_core::CudaContext;
-    /// let stream = CudaContext::new(0).unwrap().default_stream();
-    /// let mut buffer = CudaBuffer::allocate(16).unwrap();
-    /// let _ = buffer.get_write_handle::<bool>(&stream);
-    /// ```
-    ///
     /// Checks element size and device before native acquisition. Rejects CPU storage.
-    /// ```compile_fail
-    /// use cuda_buffer_rs::CudaBuffer;
-    /// use cuda_core::CudaContext;
-    /// let stream = CudaContext::new(0).unwrap().default_stream();
-    /// let mut buffer = CudaBuffer::allocate(16).unwrap();
-    /// let write = buffer.get_write_handle::<u32>(&stream).unwrap();
-    /// let read = buffer.get_read_handle::<u32>(&stream).unwrap();
-    /// drop(write);
-    /// drop(read);
-    /// ```
     pub fn get_write_handle<T: DeviceCopy>(
         &mut self,
         stream: &Arc<CudaStream>,
@@ -247,16 +203,6 @@ unsafe fn acquire_read<'a, T: DeviceCopy>(
 }
 
 /// Borrow typed CUDA data from an RMW-native message without extracting its owner.
-///
-/// ```compile_fail
-/// use cuda_buffer_rs::{CudaBuffer, get_primitive_sequence_read_handle};
-/// use cuda_core::CudaContext;
-/// let stream = CudaContext::new(0).unwrap().default_stream();
-/// let sequence = CudaBuffer::allocate(16).unwrap().into_primitive_sequence();
-/// let read = get_primitive_sequence_read_handle::<u32>(&sequence, &stream).unwrap();
-/// drop(sequence);
-/// drop(read);
-/// ```
 pub fn get_primitive_sequence_read_handle<'a, T: DeviceCopy>(
     sequence: &'a PrimitiveSequence<u8>,
     stream: &Arc<CudaStream>,
@@ -397,15 +343,6 @@ pub enum CopyKind {
 /// memory kind, accessible from this CUDA context and not overlapping the
 /// destination. Keep the source allocation alive and unchanged until the copy
 /// completes, and order any producer of the source before this copy on `stream`.
-///
-/// ```compile_fail
-/// use cuda_buffer_rs::{to_buffer, CopyKind, CudaWriteHandle};
-/// use cuda_core::CudaStream;
-/// use std::sync::Arc;
-/// fn copy(source: *const std::ffi::c_void, output: &mut CudaWriteHandle<'_, u8>, stream: &Arc<CudaStream>) {
-///     to_buffer(source, 4, output, stream, CopyKind::DeviceToDevice).unwrap();
-/// }
-/// ```
 pub unsafe fn to_buffer<T: DeviceCopy>(
     source: *const std::ffi::c_void,
     byte_count: usize,
@@ -449,16 +386,6 @@ pub unsafe fn to_buffer<T: DeviceCopy>(
 /// CUDA storage is borrowed without copying. CPU input is copied to a temporary
 /// CUDA allocation retained by the handle; the host transfer completes before
 /// returning. The source field remains unchanged.
-///
-/// ```compile_fail
-/// use cuda_buffer_rs::from_input_buffer;
-/// use cuda_core::CudaContext;
-/// let stream = CudaContext::new(0).unwrap().default_stream();
-/// let data = rosidl_runtime_rs::Buffer::from(vec![1u8; 4]);
-/// let read = from_input_buffer::<u8>(&data, &stream).unwrap();
-/// let _ = read.to_host_vec().unwrap();
-/// drop(data);
-/// ```
 pub fn from_input_buffer<'a, T: DeviceCopy>(
     buffer: &'a Buffer<u8>,
     stream: &Arc<CudaStream>,
@@ -495,17 +422,6 @@ pub fn from_input_buffer<'a, T: DeviceCopy>(
 /// output on this stream before publishing the message. Publication finalizes
 /// the write; the unused handle can drop automatically at function exit.
 /// Empty buffers and invalid typed lengths are rejected before replacement.
-///
-/// ```compile_fail
-/// use cuda_buffer_rs::{from_input_buffer, from_output_buffer};
-/// use cuda_core::CudaContext;
-/// let stream = CudaContext::new(0).unwrap().default_stream();
-/// let mut data = rosidl_runtime_rs::Buffer::from(vec![0u8; 4]);
-/// let write = from_output_buffer::<u8>(&mut data, &stream).unwrap();
-/// let read = from_input_buffer::<u8>(&data, &stream).unwrap();
-/// drop(write);
-/// drop(read);
-/// ```
 pub fn from_output_buffer<'a, T: DeviceCopy>(
     buffer: &'a mut Buffer<u8>,
     stream: &Arc<CudaStream>,
