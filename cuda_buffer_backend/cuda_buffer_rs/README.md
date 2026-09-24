@@ -7,24 +7,12 @@ SPDX-License-Identifier: Apache-2.0
 
 Rust access to ROS CUDA buffers for publishing and consuming GPU data.
 
-## Build
+## Build from source
 
 Requires Linux, Rust 1.89+, CUDA 13+, and ROS 2 with `colcon-cargo`,
 `colcon-ros-cargo`, and `cargo-ament-build`.
-
-### Debian installation
-
-Once released on the ROS build farm:
-
-```bash
-sudo apt install ros-${ROS_DISTRO}-cuda-buffer-rs \
-  ros-${ROS_DISTRO}-rclrs ros-${ROS_DISTRO}-sensor-msgs
-source /opt/ros/${ROS_DISTRO}/setup.bash
-```
-
-The Debian package is not available yet.
-
-### Source build
+[`cuda_core_vendor`](../../cuda_core_vendor/README.md) supplies the pinned
+`cuda-core` 0.3.1 dependency.
 
 From a ROS workspace containing the matching Buffer branches and message packages:
 
