@@ -15,7 +15,12 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "cuda_buffer/cuda_buffer_api.hpp"
@@ -62,6 +67,84 @@ protected:
   cudaStream_t stream1_{nullptr};
   cudaStream_t stream2_{nullptr};
 };
+
+TEST_F(CudaBufferTest, RecyclerDoesNotBlockReadyBuffersBehindPendingWork)
+{
+  struct Gate
+  {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered{false};
+    bool open{false};
+  } pending_gate, later_gate;
+  auto wait_for_gate = [](void * data) {
+      auto & gate = *static_cast<Gate *>(data);
+      std::unique_lock<std::mutex> lock(gate.mutex);
+      gate.entered = true;
+      gate.cv.notify_all();
+      gate.cv.wait(lock, [&gate] {return gate.open;});
+    };
+
+  cudaEvent_t pending_event = nullptr;
+  cudaEvent_t later_event = nullptr;
+  ASSERT_EQ(cudaSuccess, cudaEventCreateWithFlags(&pending_event, cudaEventDisableTiming));
+  ASSERT_EQ(cudaSuccess, cudaEventCreateWithFlags(&later_event, cudaEventDisableTiming));
+
+  // Ensure the later entry is still pending when destroyed. Queue the first
+  // callback only after this callback has begun, so both events are pending.
+  ASSERT_EQ(cudaSuccess, cudaLaunchHostFunc(stream2_, wait_for_gate, &later_gate));
+  ASSERT_EQ(cudaSuccess, cudaEventRecord(later_event, stream2_));
+  {
+    std::unique_lock<std::mutex> lock(later_gate.mutex);
+    ASSERT_TRUE(later_gate.cv.wait_for(
+        lock, std::chrono::seconds(5), [&later_gate] {return later_gate.entered;}));
+  }
+  ASSERT_EQ(cudaSuccess, cudaLaunchHostFunc(stream1_, wait_for_gate, &pending_gate));
+  ASSERT_EQ(cudaSuccess, cudaEventRecord(pending_event, stream1_));
+
+  std::atomic<bool> pending_released{false};
+  std::atomic<bool> later_released{false};
+  auto pending = std::make_unique<cuda_buffer_backend::CudaBuffer>(
+    new uint8_t, 1, 0, [&pending_released](uint8_t * ptr) {
+      delete ptr;
+      pending_released = true;
+    });
+  pending->set_write_event(pending_event, true);
+  pending.reset();
+
+  auto later = std::make_unique<cuda_buffer_backend::CudaBuffer>(
+    new uint8_t, 1, 0, [&later_released](uint8_t * ptr) {
+      delete ptr;
+      later_released = true;
+    });
+  later->set_write_event(later_event, true);
+  later.reset();
+
+  {
+    std::lock_guard<std::mutex> lock(later_gate.mutex);
+    later_gate.open = true;
+  }
+  later_gate.cv.notify_one();
+  EXPECT_EQ(cudaSuccess, cudaStreamSynchronize(stream2_));
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (!later_released && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_TRUE(later_released);
+  EXPECT_FALSE(pending_released);
+
+  {
+    std::lock_guard<std::mutex> lock(pending_gate.mutex);
+    pending_gate.open = true;
+  }
+  pending_gate.cv.notify_one();
+  EXPECT_EQ(cudaSuccess, cudaStreamSynchronize(stream1_));
+  // Keep the deleters' captured state alive until the recycler finishes.
+  while (!pending_released || !later_released) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
 
 TEST_F(CudaBufferTest, AllocateAndWriteHandle)
 {

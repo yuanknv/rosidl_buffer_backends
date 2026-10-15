@@ -50,6 +50,11 @@ CudaMemoryPool::~CudaMemoryPool()
 
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto & block : all_blocks_) {
+    if (block->exported_event) {
+      cudaEventDestroy(block->exported_event);
+      block->exported_event = nullptr;
+      (void)cudaGetLastError();
+    }
     if (block->ipc_meta) {
       munmap(block->ipc_meta, sizeof(IPCMetadata));
       block->ipc_meta = nullptr;
@@ -167,30 +172,77 @@ void CudaMemoryPool::free(VmmBlock * block)
   free_blocks_[block->size].push_back(block);
 }
 
-bool CudaMemoryPool::is_block_ready(VmmBlock * block) const
+void CudaMemoryPool::retain_exported_event(
+  VmmBlock * block, cudaEvent_t event, uint64_t uid)
 {
-  if (!block->ipc_meta) {
+  if (!block || !event || uid == 0) {
+    throw CudaError("Cannot retain an invalid exported CUDA event");
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (block->current_uid != uid) {
+    throw CudaError("Cannot retain a CUDA event for a stale block generation");
+  }
+  if (block->exported_event && block->exported_event != event) {
+    throw CudaError("A different CUDA event is already exported for this block generation");
+  }
+  block->exported_event = event;
+}
+
+bool CudaMemoryPool::retire_exported_event(VmmBlock * block)
+{
+  if (!block->exported_event) {
     return true;
   }
 
-  int32_t rc = block->ipc_meta->refcount.load(std::memory_order_acquire);
-  if (rc > 0) {
+  const cudaError_t status = cudaEventQuery(block->exported_event);
+  if (status == cudaErrorNotReady) {
+    (void)cudaGetLastError();
     return false;
+  }
+  if (status != cudaSuccess) {
+    RCUTILS_LOG_WARN_NAMED(
+      "cuda_memory_pool", "cudaEventQuery failed while retiring IPC event: %s",
+      cudaGetErrorName(status));
+    (void)cudaGetLastError();
+    return false;
+  }
+
+  cudaEventDestroy(block->exported_event);
+  block->exported_event = nullptr;
+  (void)cudaGetLastError();
+  return true;
+}
+
+bool CudaMemoryPool::is_block_ready(VmmBlock * block)
+{
+  if (!block->ipc_meta) {
+    return retire_exported_event(block);
   }
 
   uint64_t publish_us = block->ipc_meta->publish_timestamp_us.load(
     std::memory_order_acquire);
   if (publish_us == 0) {
-    return true;
+    return retire_exported_event(block);
   }
 
   uint64_t now = static_cast<uint64_t>(
     std::chrono::duration_cast<std::chrono::microseconds>(
       std::chrono::steady_clock::now().time_since_epoch()).count());
-  if (now < publish_us) {
+  if (now < publish_us || (now - publish_us) < grace_period_us_) {
     return false;
   }
-  return (now - publish_us) >= grace_period_us_;
+
+  // UID zero closes the generation. A consumer either holds a counted lease
+  // before this store, or observes a closed/stale UID before opening its IPC
+  // event. Using one atomic for identity and state also prevents a close/reopen
+  // race from accepting a descriptor for the previous generation.
+  block->ipc_meta->uid.store(0, std::memory_order_seq_cst);
+  if (block->ipc_meta->refcount.load(std::memory_order_seq_cst) > 0) {
+    return false;
+  }
+
+  return retire_exported_event(block);
 }
 
 bool CudaMemoryPool::probe_vmm_ipc()
